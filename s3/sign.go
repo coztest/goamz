@@ -13,6 +13,40 @@ import (
 
 var b64 = base64.StdEncoding
 
+var xamzOrder = map[string]int{
+	"x-amz-acl":               5,
+	"x-amz-copy-source":       6,
+	"x-amz-copy-source-range": 7,
+}
+
+// this struct for sort map by value
+type Pair struct {
+	Key   string
+	Value int
+}
+
+type PairList []Pair
+
+func (p PairList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p PairList) Len() int           { return len(p) }
+func (p PairList) Less(i, j int) bool { return p[i].Value < p[j].Value }
+
+// A function to turn a map into a PairList, then sort and return it.
+func sortMap(m map[string]int) []string {
+	arr := make([]string, 0, len(m))
+	pls := make(PairList, 0, len(m))
+
+	for k, v := range m {
+		p := Pair{Key: k, Value: v}
+		pls = append(pls, p)
+	}
+	sort.Sort(pls)
+	for _, v := range pls {
+		arr = append(arr, v.Key)
+	}
+	return arr
+}
+
 // ----------------------------------------------------------------------------
 // S3 signing (http://goo.gl/G1LrK)
 
@@ -43,6 +77,7 @@ func sign(auth aws.Auth, method, canonicalPath string, params, headers map[strin
 	var md5, ctype, date, xamz string
 	var xamzDate bool
 	var sarray []string
+	orderMap := make(map[string]int, len(headers))
 
 	// add security token
 	if auth.Token != "" {
@@ -53,7 +88,6 @@ func sign(auth aws.Auth, method, canonicalPath string, params, headers map[strin
 		// no auth secret; skip signing, e.g. for public read-only buckets.
 		return
 	}
-
 	for k, v := range headers {
 		k = strings.ToLower(k)
 		switch k {
@@ -68,7 +102,9 @@ func sign(auth aws.Auth, method, canonicalPath string, params, headers map[strin
 		default:
 			if strings.HasPrefix(k, "x-amz-") {
 				vall := strings.Join(v, ",")
-				sarray = append(sarray, k+":"+vall)
+				//				sarray = append(sarray, k+":"+vall)
+				orderMap[k+":"+vall] = xamzOrder[k]
+				sarray = sortMap(orderMap)
 				if k == "x-amz-date" {
 					xamzDate = true
 					date = ""
@@ -77,7 +113,8 @@ func sign(auth aws.Auth, method, canonicalPath string, params, headers map[strin
 		}
 	}
 	if len(sarray) > 0 {
-		sort.StringSlice(sarray).Sort()
+		//		sort.StringSlice(sarray).Sort()
+		//		sort.Sort(sort.Reverse(sort.StringSlice(sarray)))
 		xamz = strings.Join(sarray, "\n") + "\n"
 	}
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // Multi represents an unfinished multipart upload.
@@ -267,6 +268,52 @@ func (m *Multi) ListParts() ([]Part, error) {
 type ReaderAtSeeker interface {
 	io.ReaderAt
 	io.ReadSeeker
+}
+type CopyObjectResult struct {
+	ETag         string
+	LastModified string
+}
+
+func (m *Multi) PutPartCopy(n int, source string) (*CopyObjectResult, Part, error) {
+	headers := map[string][]string{
+		"x-amz-copy-source":       {source},
+		"x-amz-copy-source-range": {"bytes=0-"},
+		"Accept-Encoding":         {"identity"},
+	}
+	//	options.addHeaders(headers)
+	params := map[string][]string{
+		"uploadId":   {m.UploadId},
+		"partNumber": {strconv.FormatInt(int64(n), 10)},
+	}
+
+	sourceBucket := m.Bucket.S3.Bucket(strings.TrimRight(strings.SplitAfterN(source, "/", 2)[0], "/"))
+	sourceMeta, err := sourceBucket.Head(strings.SplitAfterN(source, "/", 2)[1])
+	if err != nil {
+		return nil, Part{}, err
+	}
+
+	for attempt := attempts.Start(); attempt.Next(); {
+		req := &request{
+			method:  "PUT",
+			bucket:  m.Bucket.Name,
+			path:    m.Key,
+			headers: headers,
+			params:  params,
+		}
+		resp := &CopyObjectResult{}
+		err = m.Bucket.S3.query(req, resp)
+		if shouldRetry(err) && attempt.HasNext() {
+			continue
+		}
+		if err != nil {
+			return nil, Part{}, err
+		}
+		if resp.ETag == "" {
+			return nil, Part{}, errors.New("part upload succeeded with no ETag")
+		}
+		return resp, Part{n, resp.ETag, sourceMeta.ContentLength}, nil
+	}
+	panic("unreachable")
 }
 
 // PutAll sends all of r via a multipart upload with parts no larger

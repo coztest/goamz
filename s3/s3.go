@@ -16,7 +16,6 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
-	"github.com/mitchellh/goamz/aws"
 	"io"
 	"io/ioutil"
 	"log"
@@ -27,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mitchellh/goamz/aws"
 )
 
 const debug = false
@@ -245,6 +246,29 @@ func (b *Bucket) getResponseParams(path string, params url.Values) (*http.Respon
 	panic("unreachable")
 }
 
+func (b *Bucket) GetResponseWithHeaders(path string, headers map[string][]string) (resp *http.Response, err error) {
+	req := &request{
+		bucket:  b.Name,
+		path:    path,
+		headers: headers,
+	}
+	err = b.S3.prepare(req)
+	if err != nil {
+		return nil, err
+	}
+	for attempt := attempts.Start(); attempt.Next(); {
+		resp, err := b.S3.run(req, nil)
+		if shouldRetry(err) && attempt.HasNext() {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+	panic("unreachable")
+}
+
 func (b *Bucket) Head(path string) (*http.Response, error) {
 	req := &request{
 		method: "HEAD",
@@ -384,7 +408,6 @@ type Object struct {
 
 type MultiObjectDeleteBody struct {
 	XMLName xml.Name `xml:"Delete"`
-	Quiet   bool
 	Object  []Object
 }
 
@@ -399,7 +422,7 @@ func base64md5(data []byte) string {
 //
 // See http://goo.gl/WvA5sj for details.
 func (b *Bucket) MultiDel(paths []string) error {
-	// create XML payload
+	//	 create XML payload
 	v := MultiObjectDeleteBody{}
 	v.Object = make([]Object, len(paths))
 	for i, path := range paths {
@@ -408,13 +431,20 @@ func (b *Bucket) MultiDel(paths []string) error {
 	data, _ := xml.Marshal(v)
 
 	// Content-MD5 is required
-	md5hash := base64md5(data)
+	//	md5hash := base64md5(data)
+
+	headers := map[string][]string{
+		"Content-Length":  {strconv.Itoa(len(data))},
+		"Content-MD5":     {base64md5(data)},
+		"Content-Type":    {"text/xml"},
+		"Accept-Encoding": {"identity"},
+	}
 	req := &request{
 		method:  "POST",
 		bucket:  b.Name,
 		path:    "/",
 		params:  url.Values{"delete": {""}},
-		headers: http.Header{"Content-MD5": {md5hash}},
+		headers: headers,
 		payload: bytes.NewReader(data),
 	}
 
@@ -654,7 +684,7 @@ type request struct {
 // amazonShouldEscape returns true if byte should be escaped
 func amazonShouldEscape(c byte) bool {
 	return !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-		(c >= '0' && c <= '9') || c == '_' || c == '-' || c == '~' || c == '.' || c == '/' || c == ':')
+		(c >= '0' && c <= '9') || c == '_' || c == '-' || c == '~' || c == '.' || c == '/' || c == ':' || c == '?')
 }
 
 // amazonEscape does uri escaping exactly as Amazon does
@@ -729,7 +759,12 @@ func (s3 *S3) prepare(req *request) error {
 		// Copy so they can be mutated without affecting on retries.
 		params := make(url.Values)
 		headers := make(http.Header)
+		isMultiDel := false
 		for k, v := range req.params {
+			if k == "delete" {
+				isMultiDel = true
+				continue
+			}
 			params[k] = v
 		}
 		for k, v := range req.headers {
@@ -741,13 +776,18 @@ func (s3 *S3) prepare(req *request) error {
 			req.path = "/" + req.path
 		}
 		req.signpath = req.path
-
 		if req.bucket != "" {
 			req.baseurl = s3.Region.S3BucketEndpoint
 			if req.baseurl == "" {
 				// Use the path method to address the bucket.
 				req.baseurl = s3.Region.S3Endpoint
-				req.path = "/" + req.bucket + req.path
+				if isMultiDel {
+					req.path = "/" + req.bucket + req.path + "?delete"
+					req.signpath = req.signpath + "?delete"
+				} else {
+					req.path = "/" + req.bucket + req.path
+				}
+
 			} else {
 				// Just in case, prevent injection.
 				if strings.IndexAny(req.bucket, "/:@") >= 0 {
@@ -760,7 +800,6 @@ func (s3 *S3) prepare(req *request) error {
 			req.baseurl = s3.Region.S3Endpoint
 		}
 	}
-
 	// Always sign again as it's not clear how far the
 	// server has handled a previous attempt.
 	u, err := url.Parse(req.baseurl)
